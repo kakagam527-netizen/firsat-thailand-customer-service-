@@ -1,0 +1,362 @@
+from flask import Flask, render_template, request, redirect, url_for
+import sqlite3
+
+app = Flask(__name__)
+
+DATABASE = "order_manager.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            phone TEXT,
+            address TEXT,
+            notes TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_code TEXT UNIQUE NOT NULL,
+            customer_code TEXT NOT NULL,
+            order_date TEXT,
+            source TEXT,
+            status TEXT,
+            payment_status TEXT,
+            payment_method TEXT,
+            supplier TEXT,
+            total REAL DEFAULT 0,
+            cost REAL DEFAULT 0,
+            shipping REAL DEFAULT 0,
+            paid REAL DEFAULT 0,
+            profit REAL DEFAULT 0
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_code TEXT NOT NULL,
+            product TEXT,
+            sku TEXT,
+            quantity INTEGER DEFAULT 1,
+            unit_cost REAL DEFAULT 0,
+            unit_sale REAL DEFAULT 0
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+@app.route("/")
+def dashboard():
+
+    conn = get_db()
+
+    customers = conn.execute(
+        "SELECT COUNT(*) AS count FROM customers"
+    ).fetchone()["count"]
+
+    orders = conn.execute(
+        "SELECT COUNT(*) AS count FROM orders"
+    ).fetchone()["count"]
+
+    sales = conn.execute(
+        "SELECT COALESCE(SUM(total),0) AS total FROM orders"
+    ).fetchone()["total"]
+
+    profit = conn.execute(
+        "SELECT COALESCE(SUM(profit),0) AS total FROM orders"
+    ).fetchone()["total"]
+
+    outstanding = conn.execute(
+        "SELECT COALESCE(SUM(total-paid),0) AS total FROM orders"
+    ).fetchone()["total"]
+
+    recent_orders = conn.execute("""
+        SELECT *
+        FROM orders
+        ORDER BY id DESC
+        LIMIT 10
+    """).fetchall()
+
+    conn.close()
+
+    return render_template(
+        "dashboard.html",
+        customers=customers,
+        orders=orders,
+        sales=sales,
+        profit=profit,
+        outstanding=outstanding,
+        recent_orders=recent_orders
+    )
+
+
+@app.route("/customers")
+def customers_page():
+
+    conn = get_db()
+
+    customers = conn.execute("""
+        SELECT *
+        FROM customers
+        ORDER BY id DESC
+    """).fetchall()
+
+    conn.close()
+
+    return render_template(
+        "customers.html",
+        customers=customers
+    )
+
+
+@app.route("/customers/add", methods=["GET", "POST"])
+def add_customer():
+
+    if request.method == "POST":
+
+        conn = get_db()
+
+        last = conn.execute("""
+            SELECT code
+            FROM customers
+            ORDER BY id DESC
+            LIMIT 1
+        """).fetchone()
+
+        if last:
+            number = int(last["code"].replace("CUS", "")) + 1
+        else:
+            number = 1
+
+        code = f"CUS{number:04d}"
+
+        conn.execute("""
+            INSERT INTO customers
+            (code, name, phone, address, notes)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            code,
+            request.form["name"],
+            request.form["phone"],
+            request.form["address"],
+            request.form["notes"]
+        ))
+
+        conn.commit()
+        conn.close()
+
+        return redirect(url_for("customers_page"))
+
+    return render_template("add_customer.html")
+
+
+@app.route("/orders")
+def orders_page():
+
+    conn = get_db()
+
+    orders = conn.execute("""
+        SELECT *
+        FROM orders
+        ORDER BY id DESC
+    """).fetchall()
+
+    conn.close()
+
+    return render_template(
+        "orders.html",
+        orders=orders
+    )
+
+
+@app.route("/orders/add", methods=["GET", "POST"])
+def add_order():
+
+    conn = get_db()
+
+    customers = conn.execute("""
+        SELECT *
+        FROM customers
+        ORDER BY name
+    """).fetchall()
+
+    if request.method == "POST":
+
+        last = conn.execute("""
+            SELECT order_code
+            FROM orders
+            ORDER BY id DESC
+            LIMIT 1
+        """).fetchone()
+
+        if last:
+            number = int(last["order_code"].replace("ORD", "")) + 1
+        else:
+            number = 1
+
+        order_code = f"ORD{number:05d}"
+
+        quantity = int(request.form["quantity"])
+        unit_cost = float(request.form["unit_cost"])
+        unit_sale = float(request.form["unit_sale"])
+        shipping = float(request.form["shipping"])
+        paid = float(request.form["paid"])
+
+        total = quantity * unit_sale + shipping
+        cost = quantity * unit_cost + shipping
+        profit = total - cost
+
+        remaining = total - paid
+
+        if remaining <= 0:
+            payment_status = "Paid"
+        elif paid > 0:
+            payment_status = "Partial"
+        else:
+            payment_status = "Unpaid"
+
+        conn.execute("""
+            INSERT INTO orders
+            (
+                order_code,
+                customer_code,
+                order_date,
+                source,
+                status,
+                payment_status,
+                payment_method,
+                supplier,
+                total,
+                cost,
+                shipping,
+                paid,
+                profit
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            order_code,
+            request.form["customer_code"],
+            request.form["order_date"],
+            request.form["source"],
+            request.form["status"],
+            payment_status,
+            request.form["payment_method"],
+            request.form["supplier"],
+            total,
+            cost,
+            shipping,
+            paid,
+            profit
+        ))
+
+        conn.execute("""
+            INSERT INTO order_items
+            (
+                order_code,
+                product,
+                sku,
+                quantity,
+                unit_cost,
+                unit_sale
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            order_code,
+            request.form["product"],
+            request.form["sku"],
+            quantity,
+            unit_cost,
+            unit_sale
+        ))
+
+        conn.commit()
+        conn.close()
+
+        return redirect(url_for("orders_page"))
+
+    conn.close()
+
+    return render_template(
+        "add_order.html",
+        customers=customers
+    )
+
+
+@app.route("/customer/<code>")
+def customer_details(code):
+
+    conn = get_db()
+
+    customer = conn.execute("""
+        SELECT *
+        FROM customers
+        WHERE code = ?
+    """, (code,)).fetchone()
+
+    orders = conn.execute("""
+        SELECT *
+        FROM orders
+        WHERE customer_code = ?
+        ORDER BY id DESC
+    """, (code,)).fetchall()
+
+    conn.close()
+
+    if not customer:
+        return "Customer not found", 404
+
+    return render_template(
+        "customer_details.html",
+        customer=customer,
+        orders=orders
+    )
+
+
+@app.route("/order/<order_code>")
+def order_details(order_code):
+
+    conn = get_db()
+
+    order = conn.execute("""
+        SELECT *
+        FROM orders
+        WHERE order_code = ?
+    """, (order_code,)).fetchone()
+
+    items = conn.execute("""
+        SELECT *
+        FROM order_items
+        WHERE order_code = ?
+    """, (order_code,)).fetchall()
+
+    conn.close()
+
+    if not order:
+        return "Order not found", 404
+
+    return render_template(
+        "order_details.html",
+        order=order,
+        items=items
+    )
+
+
+if __name__ == "__main__":
+    init_db()
+    app.run(debug=True)
